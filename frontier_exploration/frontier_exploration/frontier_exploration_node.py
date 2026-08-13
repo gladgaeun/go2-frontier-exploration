@@ -1,6 +1,6 @@
 # Original Code Copyright (c) 2023, Adrian Sochaniwsky (BSD 3-Clause License)
 # Source: https://github.com/adrian-soch/frontier_exploration
-# Modified & Ported for Unitree Go2 ROS 2 navigation by Ganni (2026)
+# Modified & Ported for Unitree Go2 ROS 2 navigation by Gaeun Bang (2026)
 
 #! /usr/bin/env python3
 
