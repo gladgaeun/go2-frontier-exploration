@@ -1,4 +1,4 @@
-# go2-frontier-exploration
+# go2_frontier_exploration
 Autonomous Frontier Exploration and SLAM Navigation using ROS 2 for Unitree Go2.
  
  
