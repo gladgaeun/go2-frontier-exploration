@@ -1,8 +1,7 @@
+#!/usr/bin/env python3
 # Original Code Copyright (c) 2023, Adrian Sochaniwsky (BSD 3-Clause License)
 # Source: https://github.com/adrian-soch/frontier_exploration
 # Modified & Ported for Unitree Go2 ROS 2 navigation by Gaeun Bang (2026)
-
-#! /usr/bin/env python3
 
 '''
 This node is for autonomous exploration. It requests frontier regions from a service and
@@ -38,22 +37,25 @@ class FrontierExplorer(Node):
         self.DIST_THRESH_FOR_HEADING_CALC = 0.25
 
         self.goal_pose = PoseStamped()
+        self.failed_goals = []
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        import time
+        self.get_logger().info('Waiting for map and frontiers to be ready...')
+        time.sleep(2.0)  # Allow time for the C++ detector to process the initial map
 
         self.start_time = self.get_clock().now()
         self.get_logger().info('Starting frontier exploration...')
         self.explore()
 
     def explore(self):
+        import time
 
-        while self.start_time - self.get_clock().now() < self.EXPLORATION_TIME_OUT_SEC:
-
-            # Delay getting next goal so map updates
-            prev_time = self.get_clock().now()
-            while self.get_clock().now() - prev_time < Duration(seconds=0.3):
-                pass
+        while (self.get_clock().now() - self.start_time) < self.EXPLORATION_TIME_OUT_SEC:
+            
+            time.sleep(0.5)
 
             # Get a frontier we can drive to
             self.goal_pose = self.get_reachable_goal()
@@ -68,6 +70,9 @@ class FrontierExplorer(Node):
             
             # Go to the goal pose
             self.navigator.goToPose(self.goal_pose)
+
+            # Allow time for the Nav2 action server to accept and transition to execution state
+            time.sleep(0.5)
             
             # Keep doing stuff as long as the robot is moving towards the goal
             i = 0
@@ -75,7 +80,7 @@ class FrontierExplorer(Node):
 
                 i = i + 1
                 feedback = self.navigator.getFeedback()
-                if feedback and i % 40 == 0:
+                if feedback and i % 10 == 0:
                     self.get_logger().info('Distance remaining: ' + '{:.2f}'.format(
                         feedback.distance_remaining) + ' meters.')
                 
@@ -87,36 +92,83 @@ class FrontierExplorer(Node):
                     #     self.navigator.goToPose(self.goal_pose)
             
                 # Cancel the goal if robot takes too long
-                if Duration.from_msg(feedback.navigation_time) > Duration(seconds=self.NAV_TO_GOAL_TIMEOUT_SEC):
-                    self.navigator.cancelNav()
+                if feedback and hasattr(feedback, 'navigation_time'):
+                    if Duration.from_msg(feedback.navigation_time) > Duration(seconds=self.NAV_TO_GOAL_TIMEOUT_SEC):
+                        self.get_logger().warn('Navigation timed out. Canceling goal...')
+                        self.navigator.cancelNav()
+                                
+                time.sleep(0.1)
             
             # Print result when nav completes
             result = self.navigator.getResult()
             self.log_nav_status(result)
 
+            # Allow time for SLAM to expand the map with new LiDAR scans upon goal arrival
+            if result == NavigationResult.SUCCEEDED:
+                time.sleep(1.0)
+
+            # Add to blacklist on failure/cancellation to prevent goal ping-pong loops
+            if result == NavigationResult.FAILED or result == NavigationResult.CANCELED:
+                self.failed_goals.append((self.goal_pose.pose.position.x, self.goal_pose.pose.position.y))
+                if len(self.failed_goals) > 30:
+                    self.failed_goals.pop(0) # Keep maximum 30 entries
+
     def get_reachable_goal(self):
         rank = 0
         reachable = False
+        import math
         while not reachable:
             goal = self.send_request(rank)
             if goal is None:
                 return "Done"
 
+            # Handle dummy/invalid goals by retrying or completing exploration
+            if goal.pose.position.x == 0.0 and goal.pose.position.y == 0.0:
+                if rank == 0:
+                    import time
+                    time.sleep(1.0)  # Wait for map update if the initial goal is a dummy
+                    rank += 1
+                    continue
+                return "Done"
+
             self.goal_pose = goal
             self.goal_pose.header.frame_id = 'map'
-            self.goal_pose.header.stamp = self.navigator.get_clock().now().to_msg()
+            self.goal_pose.header.stamp = self.get_clock().now().to_msg()
 
-            # sanity check a valid path exists
+            # Check if the candidate goal is near a previously blacklisted position (within 0.5m)
+            is_blacklisted = False
+            for fg in self.failed_goals:
+                if math.hypot(goal.pose.position.x - fg[0], goal.pose.position.y - fg[1]) < 0.5:
+                    is_blacklisted = True
+                    break
+            if is_blacklisted:
+                rank += 1
+                if rank > 20:
+                    return "Done"
+                continue
+
+            # Retrieve the robot's current pose
             initial_pose = self.get_current_pose()
-            if initial_pose is None:
-                # Return goal is current pose is unavailble
-                return goal
-            path = self.navigator.getPath(initial_pose, self.goal_pose)
+            if initial_pose is not None:
+                # Calculate Euclidean distance between the robot and candidate goal
+                dx = goal.pose.position.x - initial_pose.pose.position.x
+                dy = goal.pose.position.y - initial_pose.pose.position.y
+                dist = math.hypot(dx, dy)
 
-            # If top 15 frontiers are not reachable, abort
-            if path is not None:
+                if dist < 0.35:
+                    rank += 1
+                    if rank > 20:
+                        return "Done"
+                    continue
+
+                # Validate path reachability via Nav2 planner
+                path = self.navigator.getPath(initial_pose, self.goal_pose)
+                if path is not None:
+                    return goal
+            else:
                 return goal
-            elif rank > 15:
+
+            if rank > 20:
                 return None
             rank += 1
 
@@ -130,20 +182,22 @@ class FrontierExplorer(Node):
     def get_current_pose(self) -> PoseStamped:
         try:
             t = self.tf_buffer.lookup_transform(
-                "odom",
+                "map",
                 "base_link",
-                rclpy.time.Time(), Duration(seconds=0.5))
+                rclpy.time.Time(), 
+                Duration(seconds=1.0)
+            )
         except TransformException as ex:
-            self.get_logger().info(
-                f'Could not transform odom to base_link: {ex}')
-            self.get_logger().warn('Current pose unavailable.')
+            self.get_logger().warn(f'Current pose unavailable: {ex}')
             return None
             
         p = PoseStamped()
+        p.header.stamp = t.header.stamp
+        p.header.frame_id = 'map'
         p.pose.position.x = t.transform.translation.x
         p.pose.position.y = t.transform.translation.y
-        p.header.stamp = self.navigator.get_clock().now().to_msg()
-        p.header.frame_id = 'odom'
+        p.pose.position.z = 0.0
+        p.pose.orientation = t.transform.rotation
         return p
     
     def set_goal_heading(self):
@@ -152,7 +206,7 @@ class FrontierExplorer(Node):
         if curr_pose is None:
             return
         
-        # Set goal orientation to current heading
+        # Set goal orientation to match current heading
         self.goal_pose.pose.orientation.x = curr_pose.pose.orientation.x
         self.goal_pose.pose.orientation.y = curr_pose.pose.orientation.y
         self.goal_pose.pose.orientation.z = curr_pose.pose.orientation.z
