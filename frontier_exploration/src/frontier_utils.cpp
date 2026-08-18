@@ -238,34 +238,51 @@ vector<frontierRegion> computeFrontierRegions(vector<cell> &frontierCellGrid, in
 frontierRegion selectFrontier(vector<frontierRegion> &frontier_regions, int rank,
     float robot_pose_x, float robot_pose_y){
 
-    // random_device rd;
-    // std::mt19937 e2(rd());
-    // std::uniform_real_distribution<> dist(0, 10);
-    // std::normal_distribution<> dist(2, 2);
-    // float alpha = abs(1.0/dist(e2));
-
-    if (frontier_regions.empty() || rank < 0 || rank >= static_cast<int>(frontier_regions.size())) {
+    if (frontier_regions.empty()) {
         frontierRegion dummy;
         dummy.x = robot_pose_x;
         dummy.y = robot_pose_y;
         dummy.size = 0;
-        dummy.score = -1.0;
+        dummy.score = -1.0f;
         return dummy;
     }
     
-    float alpha = 0.5;
+    const float MIN_DISTANCE_THRESH = 0.4f;
+    float alpha = 0.5f;
+    vector<frontierRegion> valid_regions;
 
-    for(size_t i=0; i<frontier_regions.size(); ++i) {
-        // Euclidean dist
-        float dist = sqrt(pow((robot_pose_x - frontier_regions[i].x), 2.0) + 
-            pow((robot_pose_y - frontier_regions[i].y), 2.0));
+    for(size_t i = 0; i < frontier_regions.size(); ++i) {
+        float dist = std::hypot(robot_pose_x - frontier_regions[i].x, robot_pose_y - frontier_regions[i].y);
+        
+        // Prevent division by zero
+        float safe_dist = std::max(dist, 0.1f);
+        frontier_regions[i].score = (1.0f / safe_dist) * alpha + static_cast<float>(frontier_regions[i].size) * (1.0f - alpha);
 
-        frontier_regions[i].score = (1.0/dist)*alpha + frontier_regions[i].size*(1-alpha);
+        // Filter and register only valid frontiers beyond the minimum distance threshold
+        if (dist >= MIN_DISTANCE_THRESH) {
+            valid_regions.push_back(frontier_regions[i]);
+        }
     }
 
-    // Sort vec in place
-    sort(frontier_regions.begin(), frontier_regions.end(), compareByScore);
-    return frontier_regions.at(rank);
+    // Fallback to all candidates if no frontiers meet the minimum distance threshold
+    vector<frontierRegion> &candidates = valid_regions.empty() ? frontier_regions : valid_regions;
+
+    // Sort candidates in descending order of score
+    sort(candidates.begin(), candidates.end(), compareByScore);
+
+    // Return a dummy goal if rank exceeds candidate bounds to prevent duplicated requests
+    if (rank >= 0 && rank < static_cast<int>(candidates.size())) {
+        return candidates[rank];
+    }
+
+    frontierRegion dummy;
+    dummy.x = 0.0f;
+    dummy.y = 0.0f;
+    dummy.size = 0;
+    dummy.score = -1.0f;
+    return dummy;
+
+    return candidates.front();
 }
 
 bool compareByScore(const frontierRegion &a, const frontierRegion &b){
