@@ -125,11 +125,16 @@ class FrontierExplorer(Node):
             # Handle dummy/invalid goals by retrying or completing exploration
             if goal.pose.position.x == 0.0 and goal.pose.position.y == 0.0:
                 if rank == 0:
-                    import time
-                    time.sleep(1.0)  # Wait for map update if the initial goal is a dummy
-                    rank += 1
-                    continue
-                return "Done"
+                    for _ in range(5):
+                        import time
+                        time.sleep(1.0)
+                        goal = self.send_request(0)
+                        if goal is not None and not (goal.pose.position.x == 0.0 and goal.pose.position.y == 0.0):
+                            break
+                    if goal.pose.position.x == 0.0 and goal.pose.position.y == 0.0:
+                        return "Done"
+                else:
+                    return "Done"
 
             self.goal_pose = goal
             self.goal_pose.header.frame_id = 'map'
@@ -155,7 +160,7 @@ class FrontierExplorer(Node):
                 dy = goal.pose.position.y - initial_pose.pose.position.y
                 dist = math.hypot(dx, dy)
 
-                if dist < 0.35:
+                if dist < 0.2:
                     rank += 1
                     if rank > 20:
                         return "Done"

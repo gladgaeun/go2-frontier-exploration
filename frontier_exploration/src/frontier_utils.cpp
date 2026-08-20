@@ -198,6 +198,10 @@ vector<frontierRegion> computeFrontierRegions(vector<cell> &frontierCellGrid, in
                 }
                 // Remove the First Element of the Queue
                 cellQueue.pop();
+
+                if (newRegion.size >= 30) {
+                    break;
+                }
             }
             
             if (newRegion.size >= region_size_thresh){
